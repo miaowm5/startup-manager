@@ -30,7 +30,7 @@
   <section id="empty" class="empty" hidden>
     <div class="empty-icon">⏻</div>
     <h2>还没有自启项</h2>
-    <p>添加一个 PowerShell 命令或 exe，登录 Windows 时会自动运行，并保留命令行窗口方便查看日志。</p>
+    <p>添加一个 PowerShell 命令或程序/文件，登录 Windows 时会自动运行，并保留命令行窗口方便查看日志。</p>
     <button class="btn primary" id="btn-new-2" type="button">+ 新建第一个自启项</button>
   </section>
 
@@ -89,7 +89,7 @@
       <label>类型</label>
       <div class="seg" id="f-kind">
         <label><input type="radio" name="kind" value="powershell" checked><span>PowerShell 命令</span></label>
-        <label><input type="radio" name="kind" value="exe"><span>运行 exe</span></label>
+        <label><input type="radio" name="kind" value="exe"><span>运行 exe / 打开文件</span></label>
       </div>
     </div>
 
@@ -99,11 +99,10 @@
     </div>
 
     <div class="field" id="grp-exe" hidden>
-      <label for="f-exe">可执行文件 <small>必须是绝对路径；支持 .exe / .bat / .cmd / .com</small></label>
+      <label for="f-exe">目标文件 <small>必须是绝对路径；保存后交给系统默认程序打开（等价于双击），不等待其退出</small></label>
       <input id="f-exe" placeholder="C:\Tools\app.exe" autocomplete="off" spellcheck="false">
-      <label for="f-args" class="mt">参数</label>
+      <label for="f-args" class="mt">参数 <small>仅对 exe / 批处理等命令行程序有意义</small></label>
       <input id="f-args" placeholder='--flag "带 空格 的值"' autocomplete="off">
-      <label class="check mt"><input type="checkbox" id="f-openwith"><span>用系统默认程序打开（文档类，如 .xlsx / .pdf；不等待其退出）</span></label>
     </div>
 
     <div class="grid2">

@@ -47,7 +47,13 @@ function view(item, task) {
       }
     : null;
   let drift = null;
-  if (!taskInfo) drift = '任务不存在，自启不会生效';
+  if (item.applied && item.applied.ok === false) {
+    // 旧版本可能把系统原文（甚至乱码）存进 applied.error，这里统一换成能照着做的提示
+    const err = String(item.applied.error || '');
+    drift = /权限不足|管理员/.test(err)
+      ? err
+      : '上次同步失败，需要重新同步（如仍失败，请以管理员身份重新启动本程序）';
+  } else if (!taskInfo) drift = '任务不存在，自启不会生效';
   else if (item.enabled && !taskInfo.enabled) drift = '任务被禁用（可能是外部修改）';
   else if (!item.enabled && taskInfo.enabled) drift = '任务仍处于启用状态';
   else if (item.applied && item.applied.templateVersion !== wrapper.TEMPLATE_VERSION)
@@ -58,15 +64,32 @@ function view(item, task) {
   // 目标文件被删掉时，计划任务本身不会消失，登录后仍会触发一个必然失败的任务
   let missing = null;
   if (item.kind === 'exe' && item.exePath && !fs.existsSync(item.exePath)) {
-    missing = '可执行文件不存在：' + item.exePath;
+    missing = '目标文件不存在：' + item.exePath;
   }
 
   return { ...item, task: taskInfo, lastRun, drift, missing };
 }
 
+/**
+ * 列表排序：按登录延迟从早到晚（相同延迟按创建时间、再按名称），
+ * 让用户一眼看出谁先启动，而不是按创建顺序随机排。
+ */
+function compareByDelay(a, b) {
+  const da = Number(a.trigger && a.trigger.delaySeconds) || 0;
+  const db = Number(b.trigger && b.trigger.delaySeconds) || 0;
+  if (da !== db) return da - db;
+  const ca = String(a.createdAt || '');
+  const cb = String(b.createdAt || '');
+  if (ca !== cb) return ca < cb ? -1 : 1;
+  return String(a.name || '').localeCompare(String(b.name || ''), 'zh');
+}
+
 function listView() {
   const tasks = sched.listTasks().tasks;
-  const items = config.list().map((it) => view(it, tasks.find((t) => t.name === it.id) || null));
+  const items = config
+    .list()
+    .map((it) => view(it, tasks.find((t) => t.name === it.id) || null))
+    .sort(compareByDelay);
   return { items, fake: sched.isFake() };
 }
 
@@ -84,22 +107,71 @@ function applyTask(item) {
 }
 
 /**
- * 启动时的自愈：只处理"确定性过期"的项（脚本模板版本变化、程序路径变化），
+ * 启动时的自愈：只处理"确定性过期"的项（脚本模板版本变化、程序路径变化、上次注册失败），
  * 不去动被用户手工禁用的任务 —— 那属于人的意图，应该在界面上提示而不是偷偷改。
+ * 一旦发现权限不足就立刻停止：后续项目也一定失败，继续尝试只会刷屏并拖慢启动。
  */
 function resyncStale() {
+  const currentRunner = sched.runnerCommand().exe;
+  const elevated = sched.isElevated();
   const stale = config.list().filter((it) => {
     const a = it.applied;
     if (!a) return true;
+    // 上次写入失败：只有提权后才自动重试，否则非管理员每次启动都会撞同一条“拒绝访问”
+    if (a.ok === false) return elevated;
     if (a.templateVersion !== wrapper.TEMPLATE_VERSION) return true;
-    if (a.runner && a.runner !== sched.runnerCommand().exe) return true;
+    if (a.runner && a.runner !== currentRunner) return true;
     return false;
   });
+  if (!stale.length) return { count: 0, denied: false, total: 0 };
+
+  // 脚本是纯本地产物：先全部重写（后面即使任务写入被拒绝，脚本也是最新的）
+  for (const it of stale) wrapper.writeWrapper(it);
+
+  // 只是脚本模板变了：任务动作没变，换掉 run.ps1/run.cmd 就够了，不必重新注册任务。
+  // 否则普通权限启动时会把「管理员创建的任务」全部撞一遍拒绝访问 —— 这正是之前的刷屏来源。
+  let tasks = null;
+  const needTask = [];
+  let count = 0;
   for (const it of stale) {
-    wrapper.writeWrapper(it);
-    applyTask(it);
+    const a = it.applied;
+    const runnerChanged = !a || !a.runner || a.runner !== currentRunner;
+    const scriptOnly = !!a && a.ok !== false && !runnerChanged && a.templateVersion !== wrapper.TEMPLATE_VERSION;
+    if (scriptOnly) {
+      if (tasks === null) {
+        const listed = sched.listTasks();
+        tasks = listed.ok ? listed.tasks : null;
+      }
+      // 任务还在 → 只更新脚本和 applied 记录；任务丢了才需要重建
+      if (tasks && tasks.some((t) => t.name === it.id)) {
+        config.markApplied(it.id, {
+          ...a,
+          at: new Date().toISOString(),
+          ok: true,
+          error: null,
+          templateVersion: wrapper.TEMPLATE_VERSION,
+        });
+        count += 1;
+        continue;
+      }
+    }
+    needTask.push(it);
   }
-  return stale.length;
+
+  let denied = false;
+  for (const it of needTask) {
+    const res = applyTask(it);
+    if (res.ok) {
+      count += 1;
+      continue;
+    }
+    if (res.denied) {
+      // 没有权限时后面的项目必然同样失败，停止尝试，只在界面上提示一次
+      denied = true;
+      break;
+    }
+  }
+  return { count, denied, total: stale.length };
 }
 
 function systemInfo() {
@@ -150,6 +222,7 @@ function createItem(body) {
     item: view(config.get(item.id), taskInfoFromApply(item, res)),
     warnings: v.warnings,
     taskError: res.ok ? null : res.error,
+    denied: !!res.denied,
   });
 }
 
@@ -166,13 +239,18 @@ function updateItem(id, body) {
     item: view(config.get(id), taskInfoFromApply(item, res)),
     warnings: v.warnings,
     taskError: res.ok ? null : res.error,
+    denied: !!res.denied,
   });
 }
 
 function deleteItem(id) {
   const item = config.get(id);
   if (!item) return bad(404, '项目不存在');
-  sched.removeItem(id);
+  // 任务没删掉就删配置，会留下一个谁都管不了的孤儿任务 —— 先删任务，失败就别动配置
+  const removedTask = sched.removeItem(id);
+  if (!removedTask.ok) {
+    return bad(removedTask.denied ? 403 : 500, (removedTask.error || '移除计划任务失败') + '（项目未删除）');
+  }
   config.remove(id);
   try {
     fs.rmSync(itemDir(id), { recursive: true, force: true });
@@ -206,15 +284,29 @@ function itemAction(id, action) {
 
   if (action === 'enable' || action === 'disable') {
     const on = action === 'enable';
+    const previous = item.enabled;
     item.enabled = on;
     item.updatedAt = new Date().toISOString();
     config.upsert(item);
     let res = sched.setEnabled(id, on);
-    if (!res.ok) res = applyTask(item); // 任务被外部删除时自愈
-    const info = res.ok
-      ? { state: res.state || (on ? 'Ready' : 'Disabled'), enabled: on, lastResult: null, nextRun: null }
-      : null;
-    return ok({ item: view(config.get(id), info), taskError: res.ok ? null : res.error });
+    if (!res.ok && !res.denied) res = applyTask(item); // 任务被外部删除时自愈
+    if (!res.ok) {
+      // 任务没改成，配置也回滚，避免界面显示“已停用”但登录时照样启动
+      item.enabled = previous;
+      config.upsert(item);
+      return ok({
+        item: view(config.get(id), taskOf(id)),
+        taskError: res.error || '更新计划任务失败',
+        denied: !!res.denied,
+      });
+    }
+    const info = {
+      state: res.state || (on ? 'Ready' : 'Disabled'),
+      enabled: on,
+      lastResult: null,
+      nextRun: null,
+    };
+    return ok({ item: view(config.get(id), info) });
   }
 
   if (action === 'run') {
@@ -274,7 +366,14 @@ function uninstallTool(body) {
   const removed = [];
   for (const name of names) {
     const r = sched.removeItem(name);
-    if (r.ok) removed.push(name);
+    if (r.denied) {
+      // 权限不足时一个任务都注销不了：别把数据删掉，否则会留下无法管理的孤儿任务
+      return bad(403, sched.PERMISSION_HINT + '（卸载已取消，未删除任何数据）');
+    }
+    if (!r.ok) {
+      return bad(500, `无法注销计划任务 ${name}：${r.error || '未知错误'}（卸载已取消，未删除任何数据）`);
+    }
+    removed.push(name);
   }
 
   let deleted = false;
@@ -302,15 +401,21 @@ function uninstallTool(body) {
 
 function reconcileAll() {
   const results = [];
+  let denied = false;
   for (const item of config.list()) {
     wrapper.writeWrapper(item);
     const res = applyTask(item);
     results.push({ id: item.id, ok: !!res.ok, error: res.error || null });
+    if (res.denied) {
+      // 没有权限时后面的项目必然同样失败，停止尝试，只在界面上提示一次
+      denied = true;
+      break;
+    }
   }
-  return ok({ results });
+  return ok({ results, denied });
 }
 
-/** 目标 exe 已不存在的项目（会残留一个每次登录都失败的任务） */
+/** 目标文件已不存在的项目（会残留一个每次登录都失败的任务） */
 function isMissingTarget(item) {
   return item.kind === 'exe' && !!item.exePath && !fs.existsSync(item.exePath);
 }
@@ -320,7 +425,14 @@ function cleanupMissing() {
   const removed = [];
   for (const item of [...config.list()]) {
     if (!isMissingTarget(item)) continue;
-    sched.removeItem(item.id);
+    const r = sched.removeItem(item.id);
+    if (r.denied) {
+      return ok({ removed, denied: true, error: sched.PERMISSION_HINT });
+    }
+    if (!r.ok) {
+      log.warn('清理失效项失败，已跳过', item.id, r.error || '');
+      continue;
+    }
     config.remove(item.id);
     try {
       fs.rmSync(itemDir(item.id), { recursive: true, force: true });

@@ -160,10 +160,18 @@ function openBrowser(url) {
 
 async function serve(args) {
   ensureDirs();
-  // 自动修复"确定性过期"的项目（脚本模板升级、程序被移动），无需用户手动点同步
+
+  // 自动修复"确定性过期"的项目（脚本模板升级、程序被移动、上次注册失败），无需用户手动点同步。
+  // 遇到权限不足会立刻停下（而不是每个项目都刷一条“拒绝访问”），并给出一次可操作的提示。
   try {
-    const fixed = api.resyncStale();
-    if (fixed) console.log(`[StartupManager] 已自动重新同步 ${fixed} 个过期项目（模板或程序路径变化）`);
+    const r = api.resyncStale();
+    if (r.denied) {
+      console.log('[StartupManager] 自动同步中断：' + sched.PERMISSION_HINT);
+      const rest = r.total - r.count;
+      if (rest > 0) console.log(`[StartupManager] 已跳过其余 ${rest} 个待同步项目，脚本已更新但计划任务未全部同步。`);
+    } else if (r.count) {
+      console.log(`[StartupManager] 已自动重新同步 ${r.count} 个过期项目（模板或程序路径变化）`);
+    }
   } catch (e) {
     log.warn('自动同步失败', e.message);
   }
@@ -251,13 +259,27 @@ function main() {
   if (args.runNow) return runner.run(args.runNow, { keepOpen: false, noRelaunch: true });
   if (args.resync) {
     const res = api.reconcileAll();
-    const failed = res.json.results.filter((r) => !r.ok);
-    console.log(`已同步 ${res.json.results.length} 个项目，失败 ${failed.length} 个`);
+    const results = (res.json && res.json.results) || [];
+    if (res.json && res.json.denied) {
+      const first = results.find((r) => !r.ok);
+      console.error('同步失败：' + (first && first.error ? first.error : sched.PERMISSION_HINT));
+      console.error('请以管理员身份重新运行本程序后再试。');
+      process.exitCode = 1;
+      return;
+    }
+    const failed = results.filter((r) => !r.ok);
+    console.log(`已同步 ${results.length} 个项目，失败 ${failed.length} 个`);
     failed.forEach((f) => console.log('  - ' + f.id + '：' + f.error));
     return;
   }
   if (args.cleanMissing) {
     const res = api.cleanupMissing();
+    if (res.json && res.json.denied) {
+      console.error('清理失败：' + (res.json.error || sched.PERMISSION_HINT));
+      console.error('请以管理员身份重新运行本程序后再试。');
+      process.exitCode = 1;
+      return;
+    }
     const removed = res.json.removed;
     if (!removed.length) console.log('没有失效项需要清理。');
     else {

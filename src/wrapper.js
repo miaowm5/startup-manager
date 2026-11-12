@@ -17,7 +17,7 @@ const BOM = '\uFEFF';
  * 脚本模板版本。凡是会改变生成脚本内容的改动（调用方式、编码、环境变量处理…）都要 +1，
  * 这样已存在的项目能被识别为"脚本过期"，启动时自动重写，用户不用手工点重新同步。
  */
-const TEMPLATE_VERSION = 2;
+const TEMPLATE_VERSION = 3;
 
 /** PowerShell 单引号字面量，内部单引号翻倍 */
 function psQuote(s) {
@@ -90,19 +90,14 @@ function buildCmd(item) {
   L.push('echo [StartupManager] start %DATE% %TIME%');
   L.push('echo.');
   const args = String(item.arguments || '').trim();
-  // .bat/.cmd 必须用 call 调用，否则批处理控制权转移、不会返回，
-  // 导致后面的退出码汇总与 keepOpen 都不执行
-  const ext = path.extname(item.exePath || '').toLowerCase();
-  const isBatch = ext === '.bat' || ext === '.cmd';
-  if (item.openWith === 'default') {
-    // 交给系统关联程序打开（xlsx/pdf/图片…），不等待其退出
-    L.push('start "" "' + item.exePath + '"' + (args ? ' ' + args : ''));
-  } else {
-    L.push((isBatch ? 'call ' : '') + '"' + item.exePath + '"' + (args ? ' ' + args : ''));
-  }
+  // exe 类型统一交给系统默认程序打开，等价于在资源管理器里双击：
+  //   - .exe/.bat/.cmd/.com 由 ShellExecute 拉起，.bat/.cmd 会得到自己的控制台窗口；
+  //   - .lnk、文档、图片等交给关联程序。
+  // 一律不等待目标退出（这是「默认程序打开」的语义），所以退出码只代表 start 是否成功拉起。
+  L.push('start "" "' + item.exePath + '"' + (args ? ' ' + args : ''));
   L.push('set "__smCode=%ERRORLEVEL%"');
   L.push('echo.');
-  L.push('echo [StartupManager] process exited, code %__smCode%');
+  L.push('echo [StartupManager] 已交给系统默认程序打开，不等待其退出（start 退出码 %__smCode%）');
   L.push('exit /b %__smCode%');
   L.push('');
   return L.join('\r\n');

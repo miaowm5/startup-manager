@@ -130,53 +130,69 @@ function rawGet(pathname, hostHeader) {
   const createdExe = await call('POST', '/api/items', exeItem);
   check('POST exe = 200', createdExe.status === 200, createdExe);
   const exeId = createdExe.json.item && createdExe.json.item.id;
+  check('返回项不再带 openWith', createdExe.json.item && createdExe.json.item.openWith === undefined, createdExe.json.item);
   const cmdPath = path.join(DATA, 'items', exeId, 'run.cmd');
   check('run.cmd 已生成', fs.existsSync(cmdPath));
   const cmdBody = fs.readFileSync(cmdPath, 'utf8');
   check('cmd 含 chcp 65001', cmdBody.includes('chcp 65001'));
   check('cmd 含退出码', cmdBody.includes('exit /b'));
   check('cmd 无 BOM', !cmdBody.startsWith('\uFEFF'));
-  check('直接执行模式不含 start', !cmdBody.includes('start ""'));
+  check('exe 统一用系统默认程序打开（start ""）', cmdBody.includes('start "" "C:\\Windows\\System32\\cmd.exe"'));
+  check('不再直接调用目标文件', !/(^|\r?\n)"C:\\Windows\\System32\\cmd\.exe"/.test(cmdBody));
 
-  // 用默认程序打开：脚本应走 start ""
+  // 文档类 / 任意扩展名也不再需要手动勾选；旧配置里的 openWith 会被忽略
   const createdShell = await call('POST', '/api/items', {
-    name: '测试-默认程序',
+    name: '测试-文档',
     kind: 'exe',
-    exePath: 'C:\\Windows\\notepad.exe',
-    openWith: 'default',
+    exePath: 'C:\\Windows\\win.ini',
+    openWith: 'direct',
     trigger: { delaySeconds: 0 },
     enabled: false,
   });
-  check('POST openWith=default = 200', createdShell.status === 200, createdShell);
+  check('POST 文档类 = 200', createdShell.status === 200, createdShell);
+  check('旧的 openWith 字段被忽略', createdShell.json.item && createdShell.json.item.openWith === undefined, createdShell.json.item);
   const shellId = createdShell.json.item && createdShell.json.item.id;
   const shellBody = fs.readFileSync(path.join(DATA, 'items', shellId, 'run.cmd'), 'utf8');
-  check('默认程序模式使用 start ""', shellBody.includes('start ""'));
+  check('文档类也用 start "" 打开', shellBody.includes('start "" "C:\\Windows\\win.ini"'));
   await call('DELETE', `/api/items/${shellId}`);
 
   console.log('\n[6] 列表与校验');
   const list = await call('GET', '/api/items');
   check('列表 2 项', list.json.items && list.json.items.length === 2, list.json.items && list.json.items.length);
+  const delays = (list.json.items || []).map((it) => it.trigger.delaySeconds);
+  check('列表按登录延迟升序', delays.every((d, i) => i === 0 || delays[i - 1] <= d), delays);
   const badItem = await call('POST', '/api/items', { name: '', kind: 'powershell', command: '' });
   check('空名称/空命令 → 400', badItem.status === 400, badItem);
   check('返回 errors', Array.isArray(badItem.json.errors) && badItem.json.errors.length >= 2, badItem.json.errors);
   const badExe = await call('POST', '/api/items', { name: 'x', kind: 'exe', exePath: 'relative.exe' });
   check('相对路径 exe → 400', badExe.status === 400, badExe);
 
-  // 扩展名不支持时必须在保存阶段拦下，而不是只给警告
-  const badExt = await call('POST', '/api/items', { name: 'x', kind: 'exe', exePath: 'C:\\Windows\\notepad.psd' });
-  check('.psd 直接执行 → 400（拦截保存）', badExt.status === 400, badExt);
-  check('错误信息包含提示', String((badExt.json.errors || []).join()).includes('不能直接执行'), badExt.json.errors);
-
-  const okDefault = await call('POST', '/api/items', {
-    name: 'x-default',
+  // 不再限制扩展名：所有文件都交给系统默认程序
+  const anyExt = await call('POST', '/api/items', {
+    name: 'x-any-ext',
     kind: 'exe',
     exePath: 'C:\\Windows\\notepad.psd',
-    openWith: 'default',
     trigger: { delaySeconds: 0 },
     enabled: false,
   });
-  check('.psd + 默认程序 → 200', okDefault.status === 200, okDefault);
-  if (okDefault.json.item) await call('DELETE', `/api/items/${okDefault.json.item.id}`);
+  check('任意扩展名（.psd）→ 200', anyExt.status === 200, anyExt);
+  if (anyExt.json.item) {
+    const anyBody = fs.readFileSync(path.join(DATA, 'items', anyExt.json.item.id, 'run.cmd'), 'utf8');
+    check('.psd 生成 start ""', anyBody.includes('start ""'));
+    await call('DELETE', `/api/items/${anyExt.json.item.id}`);
+  }
+
+  // .ps1 能保存，但要提示应该用「PowerShell 命令」类型
+  const ps1Item = await call('POST', '/api/items', {
+    name: 'x-ps1',
+    kind: 'exe',
+    exePath: 'C:\\Windows\\notepad.ps1',
+    trigger: { delaySeconds: 0 },
+    enabled: false,
+  });
+  const ps1Warnings = (ps1Item.json && ps1Item.json.warnings) || [];
+  check('.ps1 → 200 且提示改用 PowerShell 类型', ps1Item.status === 200 && ps1Warnings.some((w) => w.includes('PowerShell')), ps1Item.json);
+  if (ps1Item.json.item) await call('DELETE', `/api/items/${ps1Item.json.item.id}`);
 
   console.log('\n[7] 更新 / 启停 / 同步');
   const updated = await call('PUT', `/api/items/${psId}`, { name: '测试-PS-改名', trigger: { delaySeconds: 30 } });
@@ -191,6 +207,7 @@ function rawGet(pathname, hostHeader) {
 
   const resync = await call('POST', '/api/tasks/resync', {});
   check('resync = 200 且全部成功', resync.status === 200 && resync.json.results.every((r) => r.ok), resync.json.results);
+  check('resync 带 denied 标记', resync.json.denied === false, resync.json.denied);
 
   console.log('\n[8] 预览（未保存草稿）');
   const prev = await call('POST', '/api/preview', {
@@ -214,6 +231,17 @@ function rawGet(pathname, hostHeader) {
 
   const notFound = await call('DELETE', '/api/items/does-not-exist');
   check('删除不存在 → 404', notFound.status === 404, notFound.status);
+
+  console.log('\n[10] 权限提示与解码');
+  const { decodePowerShell } = require('../src/textcodec');
+  const schedMod = require('../src/sched');
+  const utf8Denied = Buffer.from('拒绝访问。', 'utf8');
+  check('PowerShell 输出按 UTF-8 解码（不再乱码）', decodePowerShell(utf8Denied) === '拒绝访问。', decodePowerShell(utf8Denied));
+  check('能识别英文 Access is denied', schedMod.isAccessDenied('ERROR: Access is denied.'), schedMod.isAccessDenied('ERROR: Access is denied.'));
+  check('能识别中文「拒绝访问」', schedMod.isAccessDenied('错误：拒绝访问。'), schedMod.isAccessDenied('错误：拒绝访问。'));
+  check('友好提示包含管理员指引', /管理员/.test(schedMod.PERMISSION_HINT), schedMod.PERMISSION_HINT);
+  const sys2 = await call('GET', '/api/system');
+  check('system 带调度器状态', sys2.json.scheduler && sys2.json.scheduler.fake === true, sys2.json.scheduler);
 
   console.log(`\n结果：${pass} 通过，${fail} 失败`);
   process.exit(fail === 0 ? 0 : 1);

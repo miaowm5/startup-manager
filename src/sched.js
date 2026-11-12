@@ -15,13 +15,27 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { SEA, ROOT, PORTABLE } = require('./paths');
-const { decodeConsole, normalizeState } = require('./textcodec');
+const { decodeConsole, decodePowerShell, normalizeState } = require('./textcodec');
 const { effectiveWorkingDirectory } = require('./config');
 const log = require('./log');
 
 const TASK_PATH = '\\StartupManager\\';
 const FAKE = process.env.SM_FAKE_TASKS === '1';
 const fakeTasks = new Map();
+
+/** 写入计划任务被拒绝时统一给用户看的提示（不再把系统原文糊到界面上） */
+const PERMISSION_HINT =
+  '权限不足：无法写入计划任务。请关闭本程序，右键选择「以管理员身份运行」后重试。';
+
+const DENIED_RE = /access is denied|拒绝访问|0x80070005|E_ACCESSDENIED/i;
+
+function isAccessDenied(text) {
+  return DENIED_RE.test(String(text || ''));
+}
+
+function deniedResult() {
+  return { ok: false, denied: true, error: PERMISSION_HINT };
+}
 
 const NOT_FOUND_RE = /cannot find|not exist|no tasks|找不到|不存在|没有|0x80070002|0x80070490/i;
 
@@ -179,7 +193,6 @@ function applyItem(item) {
     log.info('[fake] register task', item.id, item.name);
     return { ok: true, fake: true, state: item.enabled === false ? 'Disabled' : 'Ready' };
   }
-
   const xml = buildTaskXml(item);
   const file = path.join(os.tmpdir(), `startupmanager-${process.pid}-${Date.now()}.xml`);
   try {
@@ -191,6 +204,11 @@ function applyItem(item) {
       r = schtasks(['/Create', '/TN', full, '/XML', file, '/F']);
     }
     if (r.code !== 0) {
+      // 权限问题不会因为换 PowerShell 就变好：直接给出可操作的提示，别每项耗 2.6 秒再失败
+      if (isAccessDenied(r.out + r.err)) {
+        log.warn('计划任务注册被拒绝（权限不足）：', item.name || item.id);
+        return deniedResult();
+      }
       log.warn('schtasks 注册失败，回退 PowerShell：', (r.out || r.err).slice(0, 300));
       return applyItemPs(item, xml);
     }
@@ -213,6 +231,10 @@ function removeItem(id) {
   const r = schtasks(['/Delete', '/TN', taskFullName(id), '/F']);
   if (r.code === 0) return { ok: true };
   if (NOT_FOUND_RE.test(r.out + r.err)) return { ok: true, alreadyGone: true };
+  if (isAccessDenied(r.out + r.err)) {
+    log.warn('计划任务删除被拒绝（权限不足）：', id);
+    return deniedResult();
+  }
   return removeItemPs(id);
 }
 
@@ -228,6 +250,10 @@ function setEnabled(id, on) {
   const r = schtasks(['/Change', '/TN', taskFullName(id), on ? '/ENABLE' : '/DISABLE']);
   if (r.code === 0) return { ok: true, state: on ? 'Ready' : 'Disabled' };
   if (NOT_FOUND_RE.test(r.out + r.err)) return { ok: false, error: '任务不存在' };
+  if (isAccessDenied(r.out + r.err)) {
+    log.warn('计划任务启停被拒绝（权限不足）：', id);
+    return deniedResult();
+  }
   return setEnabledPs(id, on);
 }
 
@@ -308,8 +334,8 @@ function psRun(script, timeout = 45000) {
     ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
     { timeout, windowsHide: true }
   );
-  const stdout = decodeConsole(r.stdout).trim();
-  const stderr = decodeConsole(r.stderr).trim();
+  const stdout = decodePowerShell(r.stdout).trim();
+  const stderr = decodePowerShell(r.stderr).trim();
   let payload = null;
   const lines = stdout.split(/\r?\n/).filter(Boolean);
   for (let i = lines.length - 1; i >= 0; i -= 1) {
@@ -350,7 +376,13 @@ try {
 $res | ConvertTo-Json -Compress
 `;
   const res = psRun(script);
-  if (!res.ok) log.error('注册任务失败', item.id, res.error);
+  if (!res.ok) {
+    if (isAccessDenied(res.error)) {
+      log.warn('计划任务注册被拒绝（权限不足）：', item.name || item.id);
+      return deniedResult();
+    }
+    log.error('注册任务失败', item.id, res.error);
+  }
   return res;
 }
 
@@ -369,7 +401,12 @@ try {
 }
 $res | ConvertTo-Json -Compress
 `;
-  return psRun(script);
+  const res = psRun(script);
+  if (!res.ok && isAccessDenied(res.error)) {
+    log.warn('计划任务删除被拒绝（权限不足）：', id);
+    return deniedResult();
+  }
+  return res;
 }
 
 function setEnabledPs(id, on) {
@@ -392,7 +429,12 @@ try {
 }
 $res | ConvertTo-Json -Compress
 `;
-  return psRun(script);
+  const res = psRun(script);
+  if (!res.ok && isAccessDenied(res.error)) {
+    log.warn('计划任务启停被拒绝（权限不足）：', id);
+    return deniedResult();
+  }
+  return res;
 }
 
 function listTasksPs() {
@@ -421,7 +463,10 @@ try {
 
 module.exports = {
   TASK_PATH,
+  PERMISSION_HINT,
   isFake,
+  isElevated,
+  isAccessDenied,
   runnerCommand,
   buildTaskXml,
   quoteWin,

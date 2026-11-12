@@ -51,6 +51,13 @@ function decodeWith(label, buf) {
   }
 }
 
+/** 按 UTF-8 解码；字节不合法（出现替换字符）时返回 null，交由调用方兜底 */
+function decodeUtf8(buf) {
+  if (!buf || !buf.length) return '';
+  const s = new TextDecoder('utf-8', { fatal: false }).decode(Buffer.isBuffer(buf) ? buf : Buffer.from(buf));
+  return s.includes('\uFFFD') ? null : s;
+}
+
 /** 解码一段来自控制台程序的原始输出 */
 function decodeConsole(buf) {
   if (!buf || !buf.length) return '';
@@ -70,6 +77,16 @@ function decodeConsole(buf) {
   return buffer.toString('utf8');
 }
 
+/**
+ * 解码 PowerShell 的输出。
+ * PowerShell 侧的脚本已经强制 `[Console]::OutputEncoding = UTF8`（见 sched.PREAMBLE），
+ * 所以这里必须先按 UTF-8 解；否则 UTF-8 中文会被控制台代码页（936）解成「鐠愬巺…」这种乱码。
+ */
+function decodePowerShell(buf) {
+  const s = decodeUtf8(buf);
+  return s === null ? decodeConsole(buf) : s;
+}
+
 /** 把 schtasks / 计划任务返回的状态归一化成稳定的英文枚举，避免界面显示成英文/本地化混杂 */
 function normalizeState(raw) {
   const s = String(raw || '').trim();
@@ -82,4 +99,4 @@ function normalizeState(raw) {
   return s;
 }
 
-module.exports = { decodeConsole, consoleCodePage, normalizeState };
+module.exports = { decodeConsole, decodeUtf8, decodePowerShell, consoleCodePage, normalizeState };

@@ -17,7 +17,7 @@ src/
   server.js    HTTP：token/Host/Origin/CSRF 校验、静态资源、路由分发
   api.js       业务接口：CRUD、启停、运行、脚本预览、卸载
   config.js    配置模型：normalize / validate / 原子写
-  wrapper.js   生成 run.ps1 / run.cmd（用户命令落文件，不拼命令行）
+  wrapper.js   生成 run.ps1 / run.cmd（用户命令落文件，不拼命令行；exe 一律 start 交给系统默认程序）
   sched.js     计划任务：XML 构造、注册/注销/启停/查询、fake 模式
   runner.js    控制台宿主：跑 wrapper、汇总退出码、keepOpen、写 last-run.json
   paths.js     数据目录、SEA 判定、便携模式
@@ -29,6 +29,7 @@ build/
   build.js     发布构建：单文件优先，失败才出绿色包
 test/
   smoke.js             端到端 API 测试（需 fake 调度器）
+  permission.js        权限不足行为测试（打桩，不碰真实计划任务）
   real-task-test.ps1   真机验证：真注册任务 + 探测窗口可见性
 ```
 
@@ -41,15 +42,25 @@ test/
 3. **用户命令只写进脚本文件，绝不拼进计划任务命令行**。这是绕开引号嵌套、长度限制、编码问题的唯一简单解。
 4. **退出码只能由 `runner.js` 汇总**。`$LASTEXITCODE` 不反映 `exit N`，
    在 wrapper 里打印退出码会给出错误信息（这个坑踩过一次）。
+   例外：exe 类型的 `run.cmd` 现在统一走 `start ""`（系统默认程序打开，不等待目标退出），
+   它的退出码只代表 `start` 有没有成功拉起，别把它当成目标程序的退出码。
 5. **计划任务参数不能省**：`InteractiveToken`、`ExecutionTimeLimit=PT0S`、`Hidden=false`、
    `MultipleInstances=IgnoreNew`、`AllowStartIfOnBatteries`/不 `StopIfGoingOnBatteries`。
    少任何一个都会导致「窗口不出现」或「72 小时后被杀」。
-6. **默认不提升权限**。本地 HTTP + 提权进程 = 最坏组合，只在「最高权限」项按需 UAC。
+6. **程序不自动提升权限**。本地 HTTP + 提权进程 = 最坏组合：任何操作都不静默 UAC，
+   只提示用户自己「以管理员身份运行」重启；要不要提权由用户决定。
 7. **写文件用 `fsutil.writeFileRetry`**。Windows 上杀软扫描会瞬时返回 EPERM/EBUSY。
 8. **控制台输出必须真的接到控制台**。`spawn(..., { stdio: 'ignore' })` 或 detached 直启会把子进程
    stdout 换成 **NUL 设备** —— 窗口照样弹出、标题也正常，但内容全黑。
    统一用 `cmd /c start ""` 拉起（`api.spawnRunnerDetached`），runner 在 `!process.stdout.isTTY` 时
    会自动用 `start` 重启一次自己（`--relaunched` 防循环）。回归脚本：`node test/console-probe.js`。
+9. **计划任务写入可能因权限不足失败**（典型：任务由管理员身份创建，任务文件的 ACL 只给普通权限读）。
+   `schtasks` 返回「拒绝访问」时：跳过 PowerShell 兜底（换条路也一样被拒），返回统一的
+   `PERMISSION_HINT`；`resyncStale` / `reconcileAll` 遇到 denied 立即停止，不要再逐项重试；
+   删除/清理/卸载遇到 denied 直接中止（别删配置，否则留下孤儿任务）。
+   **只是模板版本变化时不要重新注册任务**：`resyncStale` 先写脚本，用 `listTasks` 确认任务存在后
+   只更新 `applied`；`applied.ok === false` 的项目只在提权时自动重试，避免非管理员每次启动都刷错。
+   错误文本必须走 `decodePowerShell`（UTF-8 优先），否则会变成「鐠愬巺…」这种乱码。
 
 ## 常用命令
 
@@ -60,6 +71,7 @@ SM_PORT=18777 node src/main.js      # 指定端口（仅供调试；默认 8767�
 # 端到端测试（另开一个终端；SM_NO_OPEN=1 阻止测试时弹浏览器）
 SM_DATA_DIR=.sm-test SM_FAKE_TASKS=1 SM_TOKEN=tok SM_NO_OPEN=1 SM_PORT=18777 node src/main.js
 SM_DATA_DIR=.sm-test SM_BASE=http://127.0.0.1:18777 node test/smoke.js
+node test/permission.js            # 权限不足行为（打桩，不需要管理员）
 
 node build/build.js                 # 发布构建（dist 只留一个形态）
 ```

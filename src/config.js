@@ -54,8 +54,8 @@ function normalizeItem(input, existing) {
     kind,
     command: String(pick('command', '')),
     exePath: cleanPath(pick('exePath', '')),
-    // direct=直接 CreateProcess；default=交给系统默认程序（start ""，可打开 xlsx/pdf 等）
-    openWith: pick('openWith', 'direct') === 'default' ? 'default' : 'direct',
+    // exe 类型不再有「直接执行 / 默认程序」开关：生成脚本时一律交给系统默认程序（start ""）。
+    // 旧配置里的 openWith 字段会被这里自然丢弃。
     arguments: String(pick('arguments', '')),
     workingDirectory: cleanPath(pick('workingDirectory', '')),
     env: normalizeEnv(pick('env', {})),
@@ -107,24 +107,14 @@ function validate(item) {
   else if (item.name.length > 64) errors.push('名称不能超过 64 个字符');
 
   if (item.kind === 'exe') {
-    if (!item.exePath) errors.push('请填写 exe 路径');
-    else if (!path.isAbsolute(item.exePath)) errors.push('exe 路径必须是绝对路径');
+    if (!item.exePath) errors.push('请填写文件路径');
+    else if (!path.isAbsolute(item.exePath)) errors.push('文件路径必须是绝对路径');
     else {
-      const ext = path.extname(item.exePath).toLowerCase();
-      const directExts = ['.exe', '.bat', '.cmd', '.com'];
-
-      // 能不能执行与文件是否存在无关：扩展名不支持就直接拦下，别等登录后才发现跑不起来
-      if (item.openWith !== 'default' && !directExts.includes(ext)) {
-        if (ext === '.ps1') {
-          errors.push('这是 PowerShell 脚本，不能直接执行；请改用「PowerShell 命令」类型');
-        } else {
-          errors.push(
-            `「${ext || '无扩展名'}」不能直接执行（仅支持 .exe/.bat/.cmd/.com）；` +
-              '若要交给系统默认程序打开，请勾选「用系统默认程序打开」'
-          );
-        }
+      // 统一交给系统默认程序（ShellExecute），所以不再限制扩展名。
+      // 只有 .ps1 会被默认关联到记事本，几乎肯定不是用户想要的行为，给个警告。
+      if (path.extname(item.exePath).toLowerCase() === '.ps1') {
+        warnings.push('这是 PowerShell 脚本，系统默认程序通常会用记事本打开；建议改用「PowerShell 命令」类型');
       }
-
       if (!fs.existsSync(item.exePath)) warnings.push('文件不存在或当前用户无权访问：' + item.exePath);
     }
   } else if (!item.command.trim()) {

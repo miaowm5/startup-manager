@@ -104,7 +104,7 @@ function renderSystem() {
   const notes = [];
   if (s.app.fakeScheduler) notes.push('当前为测试模式（SM_FAKE_TASKS=1），不会真正写入计划任务。');
   if (!s.scheduler.ok && s.scheduler.error) notes.push('计划任务接口不可用：' + s.scheduler.error);
-  if (!s.isAdmin) notes.push('当前以普通权限运行：可以正常管理“普通权限”项目；“最高权限”项目保存时需要管理员身份。');
+  if (!s.isAdmin) notes.push('当前以普通权限运行：由管理员创建的计划任务无法修改，遇到「拒绝访问」时请关闭本程序，右键「以管理员身份运行」后再操作；新建项目一般不受影响。');
   if (notes.length) {
     banner.textContent = notes.join('\n');
     banner.hidden = false;
@@ -240,10 +240,24 @@ function card(item) {
   return el;
 }
 
+/**
+ * 与后端 /api/items 保持一致：按登录延迟从早到晚；
+ * 相同延迟按创建时间、再按名称，保证顺序稳定不跳动。
+ */
+function compareByDelay(a, b) {
+  const da = Number(a.trigger && a.trigger.delaySeconds) || 0;
+  const db = Number(b.trigger && b.trigger.delaySeconds) || 0;
+  if (da !== db) return da - db;
+  const ca = String(a.createdAt || '');
+  const cb = String(b.createdAt || '');
+  if (ca !== cb) return ca < cb ? -1 : 1;
+  return String(a.name || '').localeCompare(String(b.name || ''), 'zh');
+}
+
 function renderList() {
   const list = $('#list');
   list.textContent = '';
-  const items = state.items || [];
+  const items = [...(state.items || [])].sort(compareByDelay);
   $('#empty').hidden = items.length > 0;
   for (const item of items) list.append(card(item));
 
@@ -281,6 +295,7 @@ function upsertLocal(item) {
   const idx = state.items.findIndex((it) => it.id === item.id);
   if (idx >= 0) state.items[idx] = item;
   else state.items.push(item);
+  state.items.sort(compareByDelay);
   renderList();
 }
 
@@ -293,7 +308,13 @@ async function toggleItem(item, checkbox) {
   try {
     const res = await api(`/api/items/${item.id}/${action}`, { method: 'POST', body: {} });
     if (res.item) upsertLocal(res.item);
-    toast(checkbox.checked ? '已启用' : '已停用', 'ok');
+    if (res.taskError) {
+      // 服务端已回滚启用状态；跟着回滚勾选，别让界面和计划任务说两套话
+      checkbox.checked = !!(res.item && res.item.enabled);
+      toast(res.taskError, 'err');
+    } else {
+      toast(checkbox.checked ? '已启用' : '已停用', 'ok');
+    }
   } catch (e) {
     item.enabled = !checkbox.checked;
     checkbox.checked = !checkbox.checked;
@@ -359,7 +380,6 @@ function openEditor(item) {
   $('#f-command').value = data.command || '';
   $('#f-exe').value = data.exePath || '';
   $('#f-args').value = data.arguments || '';
-  $('#f-openwith').checked = data.openWith === 'default';
   $('#f-delay').value = data.trigger ? data.trigger.delaySeconds : 20;
   $('#f-level').value = data.runLevel || 'limited';
   $('#f-keep').checked = !data.console || data.console.keepOpen !== false;
@@ -377,7 +397,6 @@ function collect() {
     command: $('#f-command').value,
     exePath: $('#f-exe').value.trim(),
     arguments: $('#f-args').value,
-    openWith: $('#f-openwith').checked ? 'default' : 'direct',
     trigger: { delaySeconds: Math.max(0, Math.min(600, Number($('#f-delay').value) || 0)) },
     runLevel: $('#f-level').value,
     console: { keepOpen: $('#f-keep').checked },
@@ -512,8 +531,13 @@ function bind() {
     try {
       const res = await api('/api/tasks/resync', { method: 'POST', body: {} });
       const failed = (res.results || []).filter((r) => !r.ok);
-      if (failed.length) toast(`同步完成，${failed.length} 个失败：${failed[0].error || ''}`, 'err');
-      else toast('已重新同步全部计划任务', 'ok');
+      if (res.denied) {
+        toast((failed[0] && failed[0].error) || '权限不足，已停止同步', 'err');
+      } else if (failed.length) {
+        toast(`同步完成，${failed.length} 个失败：${failed[0].error || ''}`, 'err');
+      } else {
+        toast('已重新同步全部计划任务', 'ok');
+      }
       await refresh();
     } catch (e) {
       toast(e.message, 'err');
@@ -530,7 +554,8 @@ function bind() {
     if (!ok) return;
     try {
       const res = await api('/api/tasks/cleanup-missing', { method: 'POST', body: {} });
-      toast(`已清理 ${res.removed.length} 个失效项`, 'ok');
+      if (res.denied) toast(res.error || '权限不足，未能清理失效项', 'err');
+      else toast(`已清理 ${res.removed.length} 个失效项`, 'ok');
       await refresh();
     } catch (e) {
       toast(e.message, 'err');

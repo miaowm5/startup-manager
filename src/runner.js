@@ -166,7 +166,7 @@ function run(id, options = {}) {
   const keepOpen = options.keepOpen !== undefined ? !!options.keepOpen : !!(item.console && item.console.keepOpen);
 
   if (item.kind === 'exe' && item.exePath && !fs.existsSync(item.exePath)) {
-    writeErr('[StartupManager] 目标 exe 不存在：' + item.exePath + '\r\n');
+    writeErr('[StartupManager] 目标文件不存在：' + item.exePath + '\r\n');
     writeErr('[StartupManager] 请在配置界面里修正路径或删除该项目（计划任务会保留，直到删除该项目）。\r\n');
     if (keepOpen) waitForAnyKey();
     process.exitCode = 4;
