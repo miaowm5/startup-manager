@@ -1,0 +1,20 @@
+# 依赖与构建产物
+node_modules/
+dist/
+.build/
+
+# 截图/临时目录
+.sm-*/
+.sm-*
+
+# 日志与临时文件
+*.log
+*.tmp
+*.bak
+npm-debug.log*
+
+# 编辑器/系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

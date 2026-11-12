@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StartupManager · 开机自启管理</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <div class="logo" aria-hidden="true">⏻</div>
+    <div class="brand-text">
+      <h1>开机自启管理</h1>
+      <p class="sub" id="sysline">正在读取系统信息…</p>
+    </div>
+  </div>
+  <div class="top-actions">
+    <span class="pill" id="pill-admin" title="当前进程权限">…</span>
+    <span class="pill" id="pill-sched" title="计划任务服务状态">…</span>
+    <button class="btn ghost" id="btn-cleanup" type="button" hidden>清理失效项</button>
+    <button class="btn ghost" id="btn-resync" type="button">重新同步</button>
+    <button class="btn primary" id="btn-new" type="button">+ 新建自启项</button>
+  </div>
+</header>
+
+<main>
+  <section id="banner" class="banner" hidden></section>
+
+  <section id="empty" class="empty" hidden>
+    <div class="empty-icon">⏻</div>
+    <h2>还没有自启项</h2>
+    <p>添加一个 PowerShell 命令或 exe，登录 Windows 时会自动运行，并保留命令行窗口方便查看日志。</p>
+    <button class="btn primary" id="btn-new-2" type="button">+ 新建第一个自启项</button>
+  </section>
+
+  <section id="list" class="list"></section>
+</main>
+
+<footer class="page-foot">
+  <button class="btn ghost danger" id="btn-uninstall" type="button">卸载此工具…</button>
+</footer>
+
+<!-- 卸载确认 -->
+<dialog id="dlg-uninstall" class="dlg">
+  <div class="dlg-head">
+    <h2>卸载 StartupManager</h2>
+    <button class="icon-btn" type="button" data-close aria-label="关闭">×</button>
+  </div>
+  <div class="dlg-body">
+    <div id="uninstall-main">
+      <p class="uninstall-lead">将执行以下操作，且不可撤销：</p>
+      <ul class="uninstall-list">
+        <li>删除全部 <b id="uninstall-count">0</b> 个自启项，并注销它们对应的计划任务</li>
+        <li>删除配置、生成的脚本、日志与运行状态文件</li>
+        <li>本程序立即退出；<b>exe 文件需要你手动删除</b></li>
+      </ul>
+      <p class="uninstall-tip">输入「卸载」以确认：</p>
+      <input id="uninstall-confirm" placeholder="卸载" autocomplete="off" spellcheck="false">
+      <div id="uninstall-msg" class="dlg-error" hidden></div>
+    </div>
+    <div id="uninstall-done" hidden>
+      <h3 class="done-title">已卸载</h3>
+      <p class="done-text">计划任务与数据文件已清理，本程序已退出。</p>
+      <p class="done-text">现在可以直接删除 <code>StartupManager.exe</code>，不会留下任何残留。</p>
+    </div>
+  </div>
+  <div class="dlg-foot">
+    <div class="spacer"></div>
+    <button class="btn ghost" type="button" data-close>取消</button>
+    <button class="btn danger" id="btn-uninstall-do" type="button" disabled>确认卸载</button>
+  </div>
+</dialog>
+
+<!-- 编辑对话框 -->
+<dialog id="dlg-editor" class="dlg">
+  <div class="dlg-head">
+    <h2 id="dlg-title">新建自启项</h2>
+    <button class="icon-btn" type="button" data-close aria-label="关闭">×</button>
+  </div>
+  <div class="dlg-error" id="dlg-error" hidden></div>
+  <div class="dlg-body">
+    <div class="field">
+      <label for="f-name">名称</label>
+      <input id="f-name" maxlength="64" placeholder="例如：日志同步" autocomplete="off">
+    </div>
+
+    <div class="field">
+      <label>类型</label>
+      <div class="seg" id="f-kind">
+        <label><input type="radio" name="kind" value="powershell" checked><span>PowerShell 命令</span></label>
+        <label><input type="radio" name="kind" value="exe"><span>运行 exe</span></label>
+      </div>
+    </div>
+
+    <div class="field" id="grp-ps">
+      <label for="f-command">PowerShell 命令 <small>支持多行；执行结束后窗口会保留，可直接看输出</small></label>
+      <textarea id="f-command" rows="6" spellcheck="false" placeholder="Get-Date&#10;&amp; 'D:\scripts\sync.ps1'"></textarea>
+    </div>
+
+    <div class="field" id="grp-exe" hidden>
+      <label for="f-exe">可执行文件 <small>必须是绝对路径；支持 .exe / .bat / .cmd / .com</small></label>
+      <input id="f-exe" placeholder="C:\Tools\app.exe" autocomplete="off" spellcheck="false">
+      <label for="f-args" class="mt">参数</label>
+      <input id="f-args" placeholder='--flag "带 空格 的值"' autocomplete="off">
+      <label class="check mt"><input type="checkbox" id="f-openwith"><span>用系统默认程序打开（文档类，如 .xlsx / .pdf；不等待其退出）</span></label>
+    </div>
+
+    <div class="grid2">
+      <div class="field">
+        <label for="f-delay">登录后延迟（秒） <small>0–600</small></label>
+        <input id="f-delay" type="number" min="0" max="600" value="20">
+      </div>
+      <div class="field">
+        <label for="f-level">运行级别</label>
+        <select id="f-level">
+          <option value="limited">普通权限（推荐）</option>
+          <option value="highest">最高权限（需要管理员，登录时静默提权）</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="field checks">
+      <label class="check"><input type="checkbox" id="f-keep" checked><span>结束后保留窗口（按任意键关闭）</span></label>
+      <label class="check"><input type="checkbox" id="f-enabled" checked><span>启用（保存后立即注册到计划任务）</span></label>
+    </div>
+
+    <div class="field">
+      <div class="row between">
+        <label>脚本预览</label>
+        <button class="btn ghost sm" id="btn-preview" type="button">生成预览</button>
+      </div>
+      <pre id="preview" class="preview" hidden></pre>
+    </div>
+  </div>
+  <div class="dlg-foot">
+    <div class="spacer"></div>
+    <button class="btn ghost" type="button" data-close>取消</button>
+    <button class="btn primary" id="btn-save" type="button">保存并生效</button>
+  </div>
+</dialog>
+
+<!-- 脚本 / 日志查看 -->
+<dialog id="dlg-view" class="dlg">
+  <div class="dlg-head">
+    <h2 id="view-title">查看</h2>
+    <button class="icon-btn" type="button" data-close aria-label="关闭">×</button>
+  </div>
+  <div class="dlg-body">
+    <pre id="view-pre" class="preview tall"></pre>
+  </div>
+  <div class="dlg-foot">
+    <div class="spacer"></div>
+    <button class="btn ghost" type="button" data-close>关闭</button>
+  </div>
+</dialog>
+
+<div id="toasts" class="toasts" aria-live="polite"></div>
+<script src="/app.js"></script>
+</body>
+</html>
